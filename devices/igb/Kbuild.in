@@ -53,6 +53,11 @@ endif
 		igb_main-@KERNEL_IGB@-ethercat.o \
 		igb_ptp-@KERNEL_IGB@-ethercat.o
 
+	# AF_XDP zero-copy support (igb_xsk.c) only exists for newer kernels
+	ifneq ($(wildcard $(src)/igb_xsk-@KERNEL_IGB@-ethercat.c),)
+		ec_igb-objs += igb_xsk-@KERNEL_IGB@-ethercat.o
+	endif
+
 	CFLAGS_igb_main-@KERNEL_IGB@-ethercat.o = -DREV=$(REV)
 endif
 

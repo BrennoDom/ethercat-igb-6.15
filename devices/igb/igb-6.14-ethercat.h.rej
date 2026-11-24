@@ -1,0 +1,18 @@
+--- /dev/null
++++ /dev/null
+@@ -16,11 +16,15 @@
+ #include <linux/if_vlan.h>
+ #include <linux/i2c.h>
+ #include <linux/i2c-algo-bit.h>
++#include <linux/irq_work.h>
+ #include <linux/pci.h>
+ #include <linux/mdio.h>
+ 
+ #include <net/xdp.h>
+ 
++/* EtherCAT header file */
++#include "../ecdev.h"
++
+ struct igb_adapter;
+ 
+ #define E1000_PCS_CFG_IGN_SD	1

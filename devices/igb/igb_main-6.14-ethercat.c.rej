@@ -1,0 +1,224 @@
+--- /dev/null
++++ /dev/null
+@@ -2933,6 +2955,11 @@ static int igb_xdp_setup(struct net_devi
+ 
+ static int igb_xdp(struct net_device *dev, struct netdev_bpf *xdp)
+ {
++	struct igb_adapter *adapter = netdev_priv(dev);
++	if (get_ecdev(adapter))
++		return -EBUSY;
++
++
+ 	switch (xdp->command) {
+ 	case XDP_SETUP_PROG:
+ 		return igb_xdp_setup(dev, xdp);
+@@ -4517,15 +4619,17 @@ int igb_setup_rx_resources(struct igb_ri
+ 	struct device *dev = rx_ring->dev;
+ 	int size, res;
+ 
+-	/* XDP RX-queue info */
+-	if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
+-		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
+-	res = xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
+-			       rx_ring->queue_index, 0);
+-	if (res < 0) {
+-		dev_err(dev, "Failed to register xdp_rxq index %u\n",
+-			rx_ring->queue_index);
+-		return res;
++	if (!get_ecdev(adapter)) {
++		/* XDP RX-queue info */
++		if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
++			xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
++		res = xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
++					rx_ring->queue_index, 0);
++		if (res < 0) {
++			dev_err(dev, "Failed to register xdp_rxq index %u\n",
++				rx_ring->queue_index);
++			return res;
++		}
+ 	}
+ 
+ 	size = sizeof(struct igb_rx_buffer) * rx_ring->count;
+@@ -4854,9 +4959,11 @@ void igb_configure_rx_ring(struct igb_ad
+ 	int reg_idx = ring->reg_idx;
+ 	u32 rxdctl = 0;
+ 
+-	xdp_rxq_info_unreg_mem_model(&ring->xdp_rxq);
+-	WARN_ON(xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
+-					   MEM_TYPE_PAGE_SHARED, NULL));
++	if (!get_ecdev(adapter)) {
++		xdp_rxq_info_unreg_mem_model(&ring->xdp_rxq);
++		WARN_ON(xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
++						MEM_TYPE_PAGE_SHARED, NULL));
++	}
+ 
+ 	/* disable the queue */
+ 	wr32(E1000_RXDCTL(reg_idx), 0);
+@@ -4995,10 +5102,13 @@ static void igb_clean_tx_ring(struct igb
+ 		union e1000_adv_tx_desc *eop_desc, *tx_desc;
+ 
+ 		/* Free all the Tx ring sk_buffs or xdp frames */
+-		if (tx_buffer->type == IGB_TYPE_SKB)
+-			dev_kfree_skb_any(tx_buffer->skb);
+-		else
+-			xdp_return_frame(tx_buffer->xdpf);
++		struct igb_adapter *adapter = netdev_priv(tx_ring->netdev);
++		if (!get_ecdev(adapter)) {
++			if (tx_buffer->type == IGB_TYPE_SKB)
++				dev_kfree_skb_any(tx_buffer->skb);
++			else
++				xdp_return_frame(tx_buffer->xdpf);
++		}
+ 
+ 		/* unmap skb header data */
+ 		dma_unmap_single(tx_ring->dev,
+@@ -8391,10 +8522,12 @@ static bool igb_clean_tx_irq(struct igb_
+ 		total_packets += tx_buffer->gso_segs;
+ 
+ 		/* free the skb */
+-		if (tx_buffer->type == IGB_TYPE_SKB)
+-			napi_consume_skb(tx_buffer->skb, napi_budget);
+-		else
+-			xdp_return_frame(tx_buffer->xdpf);
++		if (!get_ecdev(adapter)) {
++			if (tx_buffer->type == IGB_TYPE_SKB)
++				napi_consume_skb(tx_buffer->skb, napi_budget);
++			else
++				xdp_return_frame(tx_buffer->xdpf);
++		}
+ 
+ 		/* unmap skb header data */
+ 		dma_unmap_single(tx_ring->dev,
+@@ -8999,7 +9135,6 @@ static int igb_clean_rx_irq(struct igb_q
+ 	struct igb_ring *rx_ring = q_vector->rx.ring;
+ 	u16 cleaned_count = igb_desc_unused(rx_ring);
+ 	struct sk_buff *skb = rx_ring->skb;
+-	int cpu = smp_processor_id();
+ 	unsigned int xdp_xmit = 0;
+ 	struct netdev_queue *nq;
+ 	struct xdp_buff xdp;
+@@ -9040,65 +9175,77 @@ static int igb_clean_rx_irq(struct igb_q
+ 		rx_buffer = igb_get_rx_buffer(rx_ring, size, &rx_buf_pgcnt);
+ 		pktbuf = page_address(rx_buffer->page) + rx_buffer->page_offset;
+ 
+-		/* pull rx packet timestamp if available and valid */
+-		if (igb_test_staterr(rx_desc, E1000_RXDADV_STAT_TSIP)) {
+-			int ts_hdr_len;
+-
+-			ts_hdr_len = igb_ptp_rx_pktstamp(rx_ring->q_vector,
+-							 pktbuf, &timestamp);
+-
+-			pkt_offset += ts_hdr_len;
+-			size -= ts_hdr_len;
+-		}
+-
+-		/* retrieve a buffer from the ring */
+-		if (!skb) {
+-			unsigned char *hard_start = pktbuf - igb_rx_offset(rx_ring);
+-			unsigned int offset = pkt_offset + igb_rx_offset(rx_ring);
+-
+-			xdp_prepare_buff(&xdp, hard_start, offset, size, true);
+-			xdp_buff_clear_frags_flag(&xdp);
+-#if (PAGE_SIZE > 4096)
+-			/* At larger PAGE_SIZE, frame_sz depend on len size */
+-			xdp.frame_sz = igb_rx_frame_truesize(rx_ring, size);
+-#endif
+-			skb = igb_run_xdp(adapter, rx_ring, &xdp);
+-		}
++		if (get_ecdev(adapter)) {
++			unsigned int size = le16_to_cpu(rx_desc->wb.upper.length);
++			ecdev_receive(get_ecdev(adapter), pktbuf, size);
++			adapter->ec_watchdog_jiffies = jiffies;
++			igb_reuse_rx_page(rx_ring, rx_buffer);
++		} else {
++			/* pull rx packet timestamp if available and valid */
++			if (igb_test_staterr(rx_desc, E1000_RXDADV_STAT_TSIP)) {
++				int ts_hdr_len;
+ 
+-		if (IS_ERR(skb)) {
+-			unsigned int xdp_res = -PTR_ERR(skb);
++				ts_hdr_len = igb_ptp_rx_pktstamp(rx_ring->q_vector,
++								pktbuf, &timestamp);
+ 
+-			if (xdp_res & (IGB_XDP_TX | IGB_XDP_REDIR)) {
+-				xdp_xmit |= xdp_res;
+-				igb_rx_buffer_flip(rx_ring, rx_buffer, size);
+-			} else {
++				pkt_offset += ts_hdr_len;
++				size -= ts_hdr_len;
++			}
++
++			/* retrieve a buffer from the ring */
++			if (!skb) {
++				unsigned char *hard_start = pktbuf - igb_rx_offset(rx_ring);
++				unsigned int offset = pkt_offset + igb_rx_offset(rx_ring);
++
++				xdp_prepare_buff(&xdp, hard_start, offset, size, true);
++				xdp_buff_clear_frags_flag(&xdp);
++	#if (PAGE_SIZE > 4096)
++				/* At larger PAGE_SIZE, frame_sz depend on len size */
++				xdp.frame_sz = igb_rx_frame_truesize(rx_ring, size);
++	#endif
++				skb = igb_run_xdp(adapter, rx_ring, &xdp);
++			}
++
++			if (IS_ERR(skb)) {
++				unsigned int xdp_res = -PTR_ERR(skb);
++
++				if (xdp_res & (IGB_XDP_TX | IGB_XDP_REDIR)) {
++					xdp_xmit |= xdp_res;
++					igb_rx_buffer_flip(rx_ring, rx_buffer, size);
++				} else {
++					rx_buffer->pagecnt_bias++;
++				}
++				total_packets++;
++				total_bytes += size;
++			} else if (skb)
++				igb_add_rx_frag(rx_ring, rx_buffer, skb, size);
++			else if (ring_uses_build_skb(rx_ring))
++				skb = igb_build_skb(rx_ring, rx_buffer, &xdp,
++							timestamp);
++			else
++				skb = igb_construct_skb(rx_ring, rx_buffer,
++							&xdp, timestamp);
++
++			/* exit if we failed to retrieve a buffer */
++			if (!skb) {
++				rx_ring->rx_stats.alloc_failed++;
+ 				rx_buffer->pagecnt_bias++;
++				break;
+ 			}
+-			total_packets++;
+-			total_bytes += size;
+-		} else if (skb)
+-			igb_add_rx_frag(rx_ring, rx_buffer, skb, size);
+-		else if (ring_uses_build_skb(rx_ring))
+-			skb = igb_build_skb(rx_ring, rx_buffer, &xdp,
+-					    timestamp);
+-		else
+-			skb = igb_construct_skb(rx_ring, rx_buffer,
+-						&xdp, timestamp);
+ 
+-		/* exit if we failed to retrieve a buffer */
+-		if (!skb) {
+-			rx_ring->rx_stats.alloc_failed++;
+-			rx_buffer->pagecnt_bias++;
+-			break;
++			igb_put_rx_buffer(rx_ring, rx_buffer, rx_buf_pgcnt);
+ 		}
+-
+-		igb_put_rx_buffer(rx_ring, rx_buffer, rx_buf_pgcnt);
+ 		cleaned_count++;
+ 
+ 		/* fetch next buffer in frame if non-eop */
+ 		if (igb_is_non_eop(rx_ring, rx_desc))
+ 			continue;
+ 
++		if (get_ecdev(adapter)) {
++			total_packets++;
++			continue;
++		}
++
+ 		/* verify the packet layout is correct */
+ 		if (igb_cleanup_headers(rx_ring, rx_desc, skb)) {
+ 			skb = NULL;

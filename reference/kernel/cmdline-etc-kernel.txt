@@ -1,0 +1,1 @@
+root=PARTUUID=258b70af-db0f-4501-8612-40321b727fa6 ro quiet splash rootwait intel_iommu=on iommu=pt efi=runtime isolcpus=6-N rcu_nocbs=6-N irqaffinity=0-5
